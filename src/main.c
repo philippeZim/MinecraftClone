@@ -124,6 +124,7 @@ sapp_desc sokol_main(int argc, char *argv[]) {
         .init_cb = init, .frame_cb = frame, .event_cb = event, .cleanup_cb = cleanup,
         .width = 1280, .height = 720,
         .sample_count = 4,
+        .swap_interval = 0,   // disable V-sync — uncaps FPS from the monitor refresh rate
         .window_title = "MinecraftClone",
         .logger.func = slog_func,
     };
