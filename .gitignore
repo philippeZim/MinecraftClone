@@ -2,3 +2,5 @@
 *.o
 *.a
 compile_commands.json
+textures/*.png   # active block textures (third-party pack) — not redistributed
+assets/blocks/   # extracted texture-pack library for future blocks — not redistributed

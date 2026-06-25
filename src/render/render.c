@@ -4,6 +4,9 @@
 #include "sokol_gfx.h"
 #include <stdlib.h>
 #include <math.h>
+#define STB_IMAGE_IMPLEMENTATION
+#define STBI_ONLY_PNG
+#include "stb_image.h"
 
 // Interleaved vertex: position(3 floats) + tiled UV(2 floats) + packed info(shade,layer) = 24 bytes.
 // UVs run 0..quad-extent and the sampler repeats, so one greedy quad tiles its texture per block.
@@ -27,9 +30,34 @@ static struct {
 
 static inline rchunk *rslot(int cx, int cz) { return &g_r.chunks[(cx & GRID_MASK) * GRID + (cz & GRID_MASK)]; }
 
-// --- procedural block textures: friendly, light colours with a touch of per-texel grain ----------
-#define TEX 16
-static const float BASE[BLOCK_COUNT][4] = {
+// --- block textures: load real PNGs from ./textures if present, else procedural friendly tiles ----
+#define TEX 16            // tile resolution (Minecraft default); non-16² PNGs nearest-resample to fit
+#define LIGHTEN 0.10f     // gentle "lighten up": lerp every texel this far toward white (0 = textures as-is)
+
+// Texture layers: the first BLOCK_COUNT match the BLOCK_* ids 1:1, then extra layers for the
+// per-face blocks (grass has a grass→dirt transition on its sides; a log shows end-grain on top/bottom).
+enum { TX_GRASS_SIDE = BLOCK_COUNT, TX_LOG_TOP, TX_COUNT };
+
+// Drop PNGs here to use real textures. Missing → procedural fallback tile.
+static const char *TEX_FILE[TX_COUNT] = {
+    0, "textures/grass.png", "textures/dirt.png", "textures/stone.png",
+    "textures/sand.png", "textures/water.png", "textures/wood.png", "textures/leaves.png",
+    "textures/grass_side.png", "textures/log_top.png" };
+// Per-layer tint for loaded textures (white = texture's own colour). Minecraft ships grass/leaves/water
+// greyscale and tints them by biome at runtime — we bake a friendly plains-style tint here instead.
+static const float TINT[TX_COUNT][3] = {
+    {1,1,1},                  // AIR
+    {0.57f,0.74f,0.35f},      // GRASS  plains green
+    {1,1,1},                  // DIRT
+    {1,1,1},                  // STONE
+    {1,1,1},                  // SAND
+    {0.30f,0.52f,0.92f},      // WATER  blue
+    {1,1,1},                  // WOOD
+    {0.45f,0.72f,0.32f},      // LEAVES foliage green
+    {1,1,1},                  // GRASS_SIDE (green fringe already baked in this pack)
+    {1,1,1},                  // LOG_TOP
+};
+static const float BASE[TX_COUNT][4] = {          // procedural-fallback colours (already light/friendly)
     {0,0,0,0},                  // AIR (unused)
     {0.49f,0.78f,0.42f,1.0f},   // GRASS  fresh light green
     {0.64f,0.48f,0.34f,1.0f},   // DIRT   warm light brown
@@ -38,24 +66,42 @@ static const float BASE[BLOCK_COUNT][4] = {
     {0.40f,0.69f,0.95f,0.62f},  // WATER  light sky-blue, translucent
     {0.68f,0.53f,0.37f,1.0f},   // WOOD   light bark
     {0.55f,0.81f,0.49f,1.0f},   // LEAVES soft light green
+    {0.64f,0.48f,0.34f,1.0f},   // GRASS_SIDE fallback → dirt
+    {0.80f,0.65f,0.45f,1.0f},   // LOG_TOP    fallback → pale wood end-grain
 };
 static uint32_t h32(uint32_t x) { x^=x>>16; x*=0x7feb352du; x^=x>>15; x*=0x846ca68bu; x^=x>>16; return x; }
 static uint8_t  clampu8(float v) { v = v<0?0:v>1?1:v; return (uint8_t)(v*255.0f + 0.5f); }
+static void lighten_put(uint8_t *o, float r, float g, float b, float a) {
+    o[0] = clampu8(r + (1-r)*LIGHTEN); o[1] = clampu8(g + (1-g)*LIGHTEN);
+    o[2] = clampu8(b + (1-b)*LIGHTEN); o[3] = clampu8(a);
+}
 
 static void make_textures(void) {
-    static uint8_t px[BLOCK_COUNT * TEX * TEX * 4];
-    for (int b = 0; b < BLOCK_COUNT; ++b)
-    for (int y = 0; y < TEX; ++y)
-    for (int x = 0; x < TEX; ++x) {
-        float n = (h32((uint32_t)((b*257 + y)*263 + x)) & 0xFFFF) / 65535.0f * 2.0f - 1.0f;
-        float var = (b == BLOCK_GRASS || b == BLOCK_LEAVES) ? 0.10f : 0.06f, d = b == BLOCK_WATER ? 0 : n*var;
-        if (b == BLOCK_WOOD && (x % 5) == 0) d -= 0.10f;   // vertical bark grain
-        uint8_t *o = &px[((b*TEX + y)*TEX + x) * 4];
-        o[0] = clampu8(BASE[b][0]+d); o[1] = clampu8(BASE[b][1]+d);
-        o[2] = clampu8(BASE[b][2]+d); o[3] = clampu8(BASE[b][3]);
+    static uint8_t px[TX_COUNT * TEX * TEX * 4];
+    for (int b = 0; b < TX_COUNT; ++b) {
+        uint8_t *layer = &px[b * TEX*TEX*4];
+        int sw, sh;
+        unsigned char *img = TEX_FILE[b] ? stbi_load(TEX_FILE[b], &sw, &sh, &(int){0}, 4) : NULL;
+        if (img) {                                  // real texture: tint, lighten, nearest-fit to TEX²
+            int S = sw < sh ? sw : sh;              // top square → first frame of animated strips (water)
+            for (int y = 0; y < TEX; ++y) for (int x = 0; x < TEX; ++x) {
+                const unsigned char *s = &img[((y*S/TEX)*sw + (x*S/TEX)) * 4];
+                float a = (b == BLOCK_WATER) ? BASE[b][3] : s[3]/255.0f;   // keep water translucent
+                lighten_put(&layer[(y*TEX + x)*4], s[0]/255.0f*TINT[b][0], s[1]/255.0f*TINT[b][1],
+                            s[2]/255.0f*TINT[b][2], a);
+            }
+            stbi_image_free(img);
+        } else {                                    // procedural fallback tile
+            for (int y = 0; y < TEX; ++y) for (int x = 0; x < TEX; ++x) {
+                float n = (h32((uint32_t)((b*257 + y)*263 + x)) & 0xFFFF) / 65535.0f * 2.0f - 1.0f;
+                float var = (b == BLOCK_GRASS || b == BLOCK_LEAVES) ? 0.10f : 0.06f, d = b == BLOCK_WATER ? 0 : n*var;
+                if (b == BLOCK_WOOD && (x % 5) == 0) d -= 0.10f;          // vertical bark grain
+                lighten_put(&layer[(y*TEX + x)*4], BASE[b][0]+d, BASE[b][1]+d, BASE[b][2]+d, BASE[b][3]);
+            }
+        }
     }
     sg_image img = sg_make_image(&(sg_image_desc){
-        .type = SG_IMAGETYPE_ARRAY, .width = TEX, .height = TEX, .num_slices = BLOCK_COUNT,
+        .type = SG_IMAGETYPE_ARRAY, .width = TEX, .height = TEX, .num_slices = TX_COUNT,
         .pixel_format = SG_PIXELFORMAT_RGBA8, .data.mip_levels[0] = { px, sizeof px }, .label = "block-atlas" });
     g_r.tex_view = sg_make_view(&(sg_view_desc){ .texture.image = img });
     g_r.smp = sg_make_sampler(&(sg_sampler_desc){
@@ -119,10 +165,21 @@ static void mesh(int cx, int cz, int water) {
                 float sgn = c > 0 ? 1.0f : -1.0f;
                 vec3 N = v3(d==0?sgn:0, d==1?sgn:0, d==2?sgn:0);
                 float sh = N.y>0 ? 1.0f : N.y<0 ? 0.55f : (N.x!=0 ? 0.8f : 0.65f);
-                uint32_t info = (uint32_t)(sh*255.0f) | ((uint32_t)(c<0 ? -c : c) << 8);
+                int blk = c<0 ? -c : c, layer = blk;       // per-face textures for grass + logs:
+                if (blk == BLOCK_GRASS) layer = N.y>0 ? BLOCK_GRASS : N.y<0 ? BLOCK_DIRT : TX_GRASS_SIDE;
+                else if (blk == BLOCK_WOOD) layer = N.y!=0 ? TX_LOG_TOP : BLOCK_WOOD;  // end-grain top/bottom
+                uint32_t info = (uint32_t)(sh*255.0f) | ((uint32_t)layer << 8);
 
                 vec3 cs[4] = { c0,c1,c2,c3 };
-                float uv[4][2] = { {0,0}, {(float)w,0}, {(float)w,(float)hh}, {0,(float)hh} };
+                // Orient UVs so oriented textures (grass-side fringe, log bark) stand upright: the vertical
+                // in-plane axis (world Y) maps to tex-V with the image's top at the block's top; the other
+                // axis tiles horizontally. Extents are in block units so REPEAT tiles once per block.
+                float pu[4] = {0,(float)w,(float)w,0}, pv[4] = {0,0,(float)hh,(float)hh}, uv[4][2];
+                for (int k = 0; k < 4; ++k) {
+                    if (u == 1)      { uv[k][0] = pv[k]; uv[k][1] = (float)w  - pu[k]; }  // X-face: Y is the u-axis
+                    else if (v == 1) { uv[k][0] = pu[k]; uv[k][1] = (float)hh - pv[k]; }  // Z-face: Y is the v-axis
+                    else             { uv[k][0] = pu[k]; uv[k][1] = pv[k]; }              // top/bottom: any orient
+                }
                 if (v3_dot(v3_cross(v3_sub(c1,c0), v3_sub(c3,c0)), N) < 0) {     // fix winding to CCW
                     vec3 t = cs[1]; cs[1] = cs[3]; cs[3] = t;
                     float a = uv[1][0], b = uv[1][1]; uv[1][0]=uv[3][0]; uv[1][1]=uv[3][1]; uv[3][0]=a; uv[3][1]=b;
