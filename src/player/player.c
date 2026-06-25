@@ -9,6 +9,7 @@
 #define FLY_SPEED  14.0f
 #define GRAVITY    28.0f
 #define JUMP_VEL   8.4f    // ~1.25 block jump
+#define SWIM_SPEED 4.0f    // vertical swim / max sink speed in water
 #define LOOK_SENS  0.0025f
 #define PITCH_LIM  1.553f
 
@@ -53,12 +54,22 @@ void player_update(const player_input *in, float dt) {
                        v3_scale(right, (float)(in->right - in->left)));
     wish = v3_norm(wish);
 
+    // Submerged when a solid block of water sits at chest height — swim instead of walk.
+    int wet = world_block((int)floorf(p.pos.x), (int)floorf(p.pos.y + 1.0f), (int)floorf(p.pos.z)) == BLOCK_WATER;
+
     float speed = (p.fly ? FLY_SPEED : WALK) * (in->sprint ? SPRINT : 1.0f);
+    if (wet && !p.fly) speed *= 0.6f;     // water resistance
     p.vel.x = wish.x * speed;
     p.vel.z = wish.z * speed;
 
     if (p.fly) {
         p.vel.y = (float)(in->up - in->down) * FLY_SPEED;
+    } else if (wet) {
+        p.vel.y -= GRAVITY * 0.18f * dt;                       // buoyant: slow sink
+        if (in->up)   p.vel.y = SWIM_SPEED;                    // swim up
+        if (in->down) p.vel.y = -SWIM_SPEED;                   // dive
+        p.vel.y *= 0.82f;                                      // drag
+        if (p.vel.y < -SWIM_SPEED) p.vel.y = -SWIM_SPEED;
     } else {
         p.vel.y -= GRAVITY * dt;
         if (in->up && p.on_ground) { p.vel.y = JUMP_VEL; p.on_ground = 0; }

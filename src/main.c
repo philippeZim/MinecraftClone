@@ -20,22 +20,23 @@ static struct {
     float        fps;   // smoothed frames/second for the HUD
 } g;
 
-// Drop the player onto the surface at the centre of the world.
+// Drop the player onto the surface near the world origin (its chunk must be loaded first).
 static vec3 spawn_point(void) {
-    int x = WORLD_SX/2, z = WORLD_SZ/2;
+    int x = 8, z = 8;
     int y = WORLD_SY-1; while (y > 0 && !world_solid(x, y, z)) --y;
     return v3(x + 0.5f, (float)(y + 1), z + 0.5f);
 }
 
 static void init(void) {
     stm_setup();
-    // 2 buffers per chunk + sokol_debugtext's own buffers exceed the default 128-slot
-    // pool, so size it generously (cheap; leaves headroom for edit-time rebuild churn).
+    // 4 buffers per loaded chunk (opaque+water vb/ib) across the streaming window plus rebuild
+    // churn exceed the default pool, so size it generously (cheap handles, lots of headroom).
     sg_setup(&(sg_desc){ .environment = sglue_environment(), .logger.func = slog_func,
-                         .buffer_pool_size = 1024 });
+                         .buffer_pool_size = 4096 });
     sdtx_setup(&(sdtx_desc_t){ .fonts[0] = sdtx_font_c64(), .logger.func = slog_func });
     world_init(1337);
     render_init();
+    world_update(v3(8, 0, 8));        // stream the spawn region before placing the player
     player_init(spawn_point());
     g.last = stm_now();
     sapp_lock_mouse(true);
@@ -59,6 +60,10 @@ static void frame(void) {
 
     player_update(&g.in, dt);
     g.in.mouse_dx = g.in.mouse_dy = 0.0f;
+
+    vec3 eye = player_eye();
+    world_update(eye);    // stream chunks in/out as the player roams the infinite world
+    render_update(eye);
 
     float aspect = sapp_widthf() / sapp_heightf();
     mat4 view_proj = m4_mul(m4_perspective(1.2f, aspect, 0.1f, 1000.0f), player_view());

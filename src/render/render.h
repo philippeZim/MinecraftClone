@@ -6,8 +6,9 @@
 
 #include "hmath.h"
 
-void render_init(void);                 // build all chunk meshes + pipeline (needs sg_setup + world_init)
-void render_frame(mat4 view_proj);      // draw visible chunks into the current pass
+void render_init(void);                 // build pipelines + block texture array (needs sg_setup)
+void render_update(vec3 center);        // stream chunk meshes around `center` (budgeted per frame)
+void render_frame(mat4 view_proj);      // draw visible chunks (opaque then translucent water)
 void render_after_edit(int x, int z);   // rebuild the chunk at (x,z) and any border neighbours
 void render_shutdown(void);
 

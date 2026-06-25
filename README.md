@@ -2,9 +2,11 @@
 
 A minimal voxel game in C using [sokol](https://github.com/floooh/sokol) (GL backend).
 
-Features: procedural terrain, chunked indexed meshing with hidden-face culling and
-frustum culling, walking physics (gravity, jumping, AABB-vs-voxel collision) plus a
-creative fly mode, block break/place via voxel raycast, and an FPS + coordinates HUD.
+Features: infinite streaming procedural terrain (chunks load/unload around the player),
+trees, swimmable translucent water, procedurally textured blocks (light, friendly palette),
+greedy chunked meshing with hidden-face + frustum culling, walking physics (gravity, jumping,
+AABB-vs-voxel collision, swimming) plus a creative fly mode, block break/place via voxel
+raycast, and an FPS + coordinates HUD.
 
 ## Build & run (Linux)
 
