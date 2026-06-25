@@ -1,0 +1,232 @@
+// Standalone benchmark harness: drives world/player/render through 4 deterministic
+// phases (Spawn+Ascend, Look-Around, Cruise, Stop+Look) with no user input, then
+// dumps per-phase frame-time stats to bench.csv + stdout. Mirrors main.c lifecycle
+// but synthesises input from a phase-indexed autopilot instead of keyboard/mouse.
+#include "sokol_app.h"
+#include "sokol_gfx.h"
+#include "sokol_glue.h"
+#include "sokol_log.h"
+#include "sokol_time.h"
+#include "sokol_debugtext.h"
+
+#include "config.h"
+#include "hmath.h"
+#include "world.h"
+#include "render.h"
+#include "player.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+
+// Per-phase frame budget (generous ceiling; actual exit may come earlier — phase 0
+// also ends when the eye reaches cruising altitude, regardless of frame count).
+#define P0_MAX_FRAMES  1200
+#define P1_FRAMES       480
+#define P2_FRAMES       200
+#define P3_FRAMES       480
+// Surface height is clamped to WORLD_SY-2 (=254) in terrain.c — the hard ceiling for any
+// column. Cruise *above* that, then eye.y - EYE (=1.62) puts the player feet above every
+// possible peak, so phase-2 forward flight never collides and we measure streaming/draw
+// cost, not collision-revert noise.
+#define CRUISE_ALTITUDE 255.5f
+
+typedef struct {
+    int     n;
+    int     cap;
+    double  sum;     // seconds, for accurate mean
+    float   minv;    // seconds
+    float   maxv;    // seconds
+    float  *samples; // ms, sized once at init to the phase ceiling — no realloc
+} bench_stats;
+
+static struct {
+    player_input in;
+    uint64_t     last;
+    int          phase;
+    int          frame_in_phase;
+    int          fly_set;
+    int          cruise_set;
+    bench_stats  phases[4];
+} g;
+
+// Drop the player onto dry land near the world origin (its chunks must be loaded
+// first): same scan as main.c — duplicated here so this file stays self-contained
+// (no code-sharing with main.c; both link the same public headers).
+static vec3 spawn_point(void) {
+    for (int r = 0; r < 96; ++r) {
+        int x = 8 + (r*131 % 161) - 80, z = 8 + (r*197 % 161) - 80;
+        int y = WORLD_SY-1; while (y > 0 && !world_solid(x, y, z)) --y;
+        if (y > SEA_LEVEL) return v3(x + 0.5f, (float)(y + 1), z + 0.5f);
+    }
+    int y = WORLD_SY-1; while (y > 0 && !world_solid(8, y, 8)) --y;
+    return v3(8.5f, (float)(y + 1), 8.5f);
+}
+
+static int cmp_float(const void *a, const void *b) {
+    float x = *(const float*)a, y = *(const float*)b;
+    return (x > y) - (x < y);
+}
+
+static float pct(const float *sorted, int n, float q) {
+    if (!n) return 0.0f;
+    int i = (int)(q * (n - 1));
+    if (i < 0) i = 0;
+    if (i >= n) i = n - 1;
+    return sorted[i];
+}
+
+static void stats_init(bench_stats *s, int cap) {
+    s->cap = cap;
+    s->samples = (float*)malloc((size_t)cap * sizeof(float));
+    s->minv = 1e30f; s->maxv = 0.0f; s->sum = 0.0; s->n = 0;
+}
+
+static inline void stats_push(bench_stats *s, float dt_ms) {
+    s->samples[s->n++] = dt_ms;
+    s->sum += dt_ms * 1e-3;
+    if (dt_ms < s->minv) s->minv = dt_ms;
+    if (dt_ms > s->maxv) s->maxv = dt_ms;
+}
+
+// Fill one CSV line for the phase. `name` is the label printed in the first column.
+static void stats_emit(const bench_stats *s, const char *name, FILE *f) {
+    qsort(s->samples, (size_t)s->n, sizeof(float), cmp_float);
+    float avg = s->n ? (float)(s->sum / s->n) * 1000.0f : 0.0f;
+    float p50 = pct(s->samples, s->n, 0.50f);
+    float p95 = pct(s->samples, s->n, 0.95f);
+    float fps = avg > 0.0f ? 1000.0f / avg : 0.0f;
+    fprintf(f, "%s,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.1f\n",
+            name, s->n, avg, s->minv, p50, p95, s->maxv, fps);
+}
+
+// Synthesise the input for the current phase. Pure function of (phase, frame_in_phase).
+static void autopilot(void) {
+    g.in = (player_input){0};
+
+    switch (g.phase) {
+    case 0: // Spawn+Ascend: toggle fly once, then hold up (boosted) until y >= CRUISE_ALTITUDE.
+        if (!g.fly_set) { player_toggle_fly(); g.fly_set = 1; }
+        g.in.up = 1;
+        g.in.boost = 1; // multiply FLY_SPEED by BOOST=4 → fast climb without waiting forever
+        g.frame_in_phase++;
+        if (player_eye().y >= CRUISE_ALTITUDE || g.frame_in_phase >= P0_MAX_FRAMES) {
+            g.phase = 1; g.frame_in_phase = 0;
+        }
+        break;
+
+    case 1: { // Look-Around: half-sweep yaw +1, half-sweep yaw -1, with brief pitch nudges.
+        int h = g.frame_in_phase++;
+        g.in.mouse_dx = (h < P1_FRAMES/2) ? 2.0f : -2.0f;
+        if (h < 90)               g.in.mouse_dy =  1.0f;
+        else if (h >= P1_FRAMES-90) g.in.mouse_dy = -1.0f;
+        if (g.frame_in_phase >= P1_FRAMES) { g.phase = 2; g.frame_in_phase = 0; }
+        break;
+    }
+
+    case 2: // Cruise: forward=1 until phase budget exhausted; collision reverts are allowed.
+        g.in.forward = 1;
+        g.cruise_set = 1;
+        g.frame_in_phase++;
+        if (g.frame_in_phase >= P2_FRAMES) { g.phase = 3; g.frame_in_phase = 0; }
+        break;
+
+    case 3: // Stop+Look: slow yaw sweep, then quit.
+        g.in.mouse_dx = (g.frame_in_phase < P3_FRAMES/2) ? 1.5f : -1.5f;
+        g.frame_in_phase++;
+        if (g.frame_in_phase >= P3_FRAMES) sapp_quit();
+        break;
+    }
+}
+
+static void hud(void) {
+    sdtx_canvas(sapp_widthf()*0.5f, sapp_heightf()*0.5f);
+    sdtx_origin(1.0f, 1.0f);
+    sdtx_font(0);
+    sdtx_color3b(255, 255, 255);
+    vec3 p = player_eye();
+    sdtx_printf("BENCH p%d f%d\n", g.phase, g.frame_in_phase);
+    sdtx_printf("XYZ %.1f %.1f %.1f", p.x, p.y, p.z);
+}
+
+static void init(void) {
+    stm_setup();
+    sg_setup(&(sg_desc){ .environment = sglue_environment(), .logger.func = slog_func,
+                         .buffer_pool_size = 4096 });
+    sdtx_setup(&(sdtx_desc_t){ .fonts[0] = sdtx_font_c64(), .logger.func = slog_func });
+    world_init(1337);
+    render_init();
+    world_update(v3(8, 0, 8));
+    player_init(spawn_point());
+    g.last = stm_now();
+
+    stats_init(&g.phases[0], P0_MAX_FRAMES);
+    stats_init(&g.phases[1], P1_FRAMES);
+    stats_init(&g.phases[2], P2_FRAMES);
+    stats_init(&g.phases[3], P3_FRAMES);
+}
+
+static void frame(void) {
+    float dt = (float)stm_sec(stm_laptime(&g.last));
+    if (dt > 0.1f) dt = 0.1f;
+    float dt_ms = dt * 1000.0f;
+
+    autopilot();
+    player_update(&g.in, dt);
+    g.in.mouse_dx = g.in.mouse_dy = 0.0f;
+
+    vec3 eye = player_eye();
+    world_update(eye);
+    render_update(eye);
+
+    float aspect = sapp_widthf() / sapp_heightf();
+    mat4 view_proj = m4_mul(m4_perspective(1.2f, aspect, 0.1f, 1000.0f), player_view());
+    hud();
+
+    sg_begin_pass(&(sg_pass){
+        .action.colors[0] = { .load_action = SG_LOADACTION_CLEAR, .clear_value = {0.52f,0.70f,0.95f,1.0f} },
+        .swapchain = sglue_swapchain(),
+    });
+    render_frame(view_proj);
+    sdtx_draw();
+    sg_end_pass();
+    sg_commit();
+
+    // Phase 0..3 cover every frame the autopilot can run; bound writes defensively.
+    if (g.phase >= 0 && g.phase < 4 && g.phases[g.phase].n < g.phases[g.phase].cap) {
+        stats_push(&g.phases[g.phase], dt_ms);
+    }
+}
+
+static void cleanup(void) {
+    FILE *f = fopen("bench.csv", "w");
+    if (!f) f = stdout;
+    fprintf(f, "Phase,N,avg_ms,min_ms,p50_ms,p95_ms,max_ms,fps\n");
+    int total_n = 0; double total_sum = 0.0;
+    static const char *names[4] = { "Spawn+Ascend", "Look-Around", "Cruise", "Stop+Look" };
+    for (int i = 0; i < 4; ++i) {
+        stats_emit(&g.phases[i], names[i], f);
+        total_n += g.phases[i].n;
+        total_sum += g.phases[i].sum;
+    }
+    if (f != stdout) { fflush(f); fclose(f); }
+    fprintf(stdout, "Wrote bench.csv (phase0..3 n=%d)\n", total_n);
+    (void)total_n; (void)total_sum;
+
+    for (int i = 0; i < 4; ++i) free(g.phases[i].samples);
+
+    render_shutdown();
+    sdtx_shutdown();
+    sg_shutdown();
+}
+
+sapp_desc sokol_main(int argc, char *argv[]) {
+    (void)argc; (void)argv;
+    return (sapp_desc){
+        .init_cb = init, .frame_cb = frame, .cleanup_cb = cleanup,
+        .width = 1280, .height = 720,
+        .sample_count = 1,
+        .swap_interval = 0,
+        .window_title = "MinecraftClone-bench",
+        .logger.func = slog_func,
+    };
+}
