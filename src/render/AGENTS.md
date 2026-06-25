@@ -11,7 +11,8 @@ Public contract: `render.h`
 - `render_shutdown()`.
 
 Deps: `core` (hmath, sokol_gfx) + `world` (reads blocks). Vertex = pos3+normal3+color3,
-uint32 indices. Shaders are embedded GLSL 410. `FACES[6]` = CCW cube faces, `SHADE`/
-`BLOCK_COLOR` drive look. Frustum planes via Gribb-Hartmann in `extract_planes`.
+uint32 indices. Shaders are embedded GLSL 410. `build_chunk` uses **greedy meshing**
+(coplanar same-block faces merge into one quad via a signed face mask; winding fixed by a
+cross-product test against the face normal). Frustum planes via Gribb-Hartmann.
 
-Likely next work: greedy meshing, texture atlas, async/threaded chunk builds, transparency.
+Likely next work: texture atlas, async/threaded chunk builds, transparency, packed vertices.

@@ -18,16 +18,7 @@ static struct {
     chunk       chunks[NCX][NCZ];
 } g_r;
 
-// 6 cube faces: neighbour offset to test for culling + 4 CCW corners (outward normal).
-static const struct { int dx,dy,dz; float c[4][3]; } FACES[6] = {
-    {  1, 0, 0, {{1,0,1},{1,0,0},{1,1,0},{1,1,1}} }, // +X
-    { -1, 0, 0, {{0,0,0},{0,0,1},{0,1,1},{0,1,0}} }, // -X
-    {  0, 1, 0, {{0,1,0},{0,1,1},{1,1,1},{1,1,0}} }, // +Y (top)
-    {  0,-1, 0, {{0,0,0},{1,0,0},{1,0,1},{0,0,1}} }, // -Y (bottom)
-    {  0, 0, 1, {{0,0,1},{1,0,1},{1,1,1},{0,1,1}} }, // +Z
-    {  0, 0,-1, {{1,0,0},{0,0,0},{0,1,0},{1,1,0}} }, // -Z
-};
-static const float SHADE[6] = { 0.8f,0.8f, 1.0f,0.55f, 0.65f,0.65f };
+// Base RGB per block type, indexed by the BLOCK_* enum (greedy mesher shades per face).
 static const float BLOCK_COLOR[BLOCK_COUNT][3] = {
     {0,0,0}, {0.35f,0.62f,0.25f}, {0.55f,0.40f,0.25f}, {0.50f,0.50f,0.52f}, {0.85f,0.78f,0.55f},
 };
@@ -42,29 +33,67 @@ static void reserve(int verts) {
     si = realloc(si, scap*6/4*sizeof(uint32_t)); // 6 indices per 4 verts
 }
 
-// Build (or rebuild) the mesh for chunk (cx,cz) into GPU buffers.
+// Greedy-mesh scratch mask (largest u*v face plane for a chunk column).
+#define MASK_MAX (WORLD_SY * (CHUNK_SX > CHUNK_SZ ? CHUNK_SX : CHUNK_SZ))
+static int g_mask[MASK_MAX];
+
+// Build (or rebuild) the mesh for chunk (cx,cz) with greedy meshing: coplanar same-block
+// faces merge into single quads, collapsing flat spans (terrain top, world walls, floor)
+// from thousands of quads into a handful. Mask value sign encodes the face direction.
 static void build_chunk(int cx, int cz) {
     chunk *ch = &g_r.chunks[cx][cz];
     if (ch->vb.id) { sg_destroy_buffer(ch->vb); sg_destroy_buffer(ch->ib); ch->vb.id = ch->ib.id = 0; }
     ssvlen = ssilen = 0;
-    int x0 = cx*CHUNK_SX, z0 = cz*CHUNK_SZ;
-    for (int x = x0; x < x0+CHUNK_SX; ++x)
-    for (int y = 0;  y < WORLD_SY;      ++y)
-    for (int z = z0; z < z0+CHUNK_SZ; ++z) {
-        uint8_t b = world_block(x,y,z);
-        if (b == BLOCK_AIR) continue;
-        const float *col = BLOCK_COLOR[b];
-        for (int f = 0; f < 6; ++f) {
-            if (world_solid(x+FACES[f].dx, y+FACES[f].dy, z+FACES[f].dz)) continue;
-            reserve(4);
-            uint32_t base = (uint32_t)ssvlen;
-            float s = SHADE[f];
-            for (int i = 0; i < 4; ++i)
-                sv[ssvlen++] = (vertex){ x+FACES[f].c[i][0], y+FACES[f].c[i][1], z+FACES[f].c[i][2],
-                                         (float)FACES[f].dx,(float)FACES[f].dy,(float)FACES[f].dz,
-                                         col[0]*s, col[1]*s, col[2]*s };
-            uint32_t q[6] = { base,base+1,base+2, base,base+2,base+3 };
-            for (int i = 0; i < 6; ++i) si[ssilen++] = q[i];
+    int dims[3] = { CHUNK_SX, WORLD_SY, CHUNK_SZ };
+    int off[3]  = { cx*CHUNK_SX, 0, cz*CHUNK_SZ };
+
+    for (int d = 0; d < 3; ++d) {
+        int u = (d+1)%3, v = (d+2)%3, wdim = dims[u], hdim = dims[v], p[3];
+        for (int s = -1; s < dims[d]; ++s) {
+            // Mask the boundary between layer s and s+1: +id if the lower cell owns the
+            // face, -id if the upper cell does, 0 if no visible face (or owned by a neighbour chunk).
+            int n = 0;
+            for (p[v] = 0; p[v] < hdim; ++p[v])
+            for (p[u] = 0; p[u] < wdim; ++p[u], ++n) {
+                p[d] = s;   int A = world_block(off[0]+p[0], off[1]+p[1], off[2]+p[2]);
+                p[d] = s+1; int B = world_block(off[0]+p[0], off[1]+p[1], off[2]+p[2]);
+                int As = A != BLOCK_AIR, Bs = B != BLOCK_AIR;
+                g_mask[n] = (As && !Bs) ? (s >= 0          ?  A : 0)
+                          : (Bs && !As) ? (s < dims[d]-1   ? -B : 0) : 0;
+            }
+            // Merge equal-value mask cells into maximal rectangles, one quad each.
+            n = 0;
+            for (int j = 0; j < hdim; ++j)
+            for (int i = 0; i < wdim; ) {
+                int c = g_mask[n];
+                if (c == 0) { ++i; ++n; continue; }
+                int w = 1; while (i+w < wdim && g_mask[n+w] == c) ++w;
+                int h = 1, stop = 0;
+                while (j+h < hdim) {
+                    for (int k = 0; k < w; ++k) if (g_mask[n + k + h*wdim] != c) { stop = 1; break; }
+                    if (stop) break; ++h;
+                }
+                int base[3], du[3] = {0,0,0}, dv[3] = {0,0,0};
+                base[d] = s+1; base[u] = i; base[v] = j; du[u] = w; dv[v] = h;
+                vec3 c0 = v3(off[0]+base[0], off[1]+base[1], off[2]+base[2]);
+                vec3 c1 = v3(c0.x+du[0], c0.y+du[1], c0.z+du[2]);
+                vec3 c3 = v3(c0.x+dv[0], c0.y+dv[1], c0.z+dv[2]);
+                vec3 c2 = v3(c1.x+dv[0], c1.y+dv[1], c1.z+dv[2]);
+                float sgn = c > 0 ? 1.0f : -1.0f;
+                vec3 N = v3(d==0?sgn:0, d==1?sgn:0, d==2?sgn:0);
+                if (v3_dot(v3_cross(v3_sub(c1,c0), v3_sub(c3,c0)), N) < 0) { vec3 t=c1; c1=c3; c3=t; }
+                float sh = N.y>0 ? 1.0f : N.y<0 ? 0.55f : (N.x!=0 ? 0.8f : 0.65f);
+                const float *col = BLOCK_COLOR[c<0 ? -c : c];
+                float r=col[0]*sh, g=col[1]*sh, b=col[2]*sh;
+                reserve(4);
+                uint32_t bi = (uint32_t)ssvlen;
+                vec3 cs[4] = { c0,c1,c2,c3 };
+                for (int q=0;q<4;++q) sv[ssvlen++] = (vertex){ cs[q].x,cs[q].y,cs[q].z, N.x,N.y,N.z, r,g,b };
+                uint32_t qi[6] = { bi,bi+1,bi+2, bi,bi+2,bi+3 };
+                for (int q=0;q<6;++q) si[ssilen++] = qi[q];
+                for (int l=0;l<h;++l) for (int k=0;k<w;++k) g_mask[n+k+l*wdim] = 0;
+                i += w; n += w;
+            }
         }
     }
     ch->index_count = ssilen;
