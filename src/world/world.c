@@ -52,3 +52,32 @@ uint8_t world_block(int x, int y, int z) {
 int world_solid(int x, int y, int z) {
     return world_block(x, y, z) != BLOCK_AIR;
 }
+
+void world_set_block(int x, int y, int z, uint8_t b) {
+    if (in_bounds(x, y, z)) g_blocks[idx(x, y, z)] = b;
+}
+
+// Amanatides & Woo voxel DDA: step the integer cell along `dir` until a solid hit.
+world_hit world_raycast(vec3 origin, vec3 dir, float max_dist) {
+    world_hit h = {0};
+    int x = (int)floorf(origin.x), y = (int)floorf(origin.y), z = (int)floorf(origin.z);
+    int px = x, py = y, pz = z;
+    int sx = dir.x > 0 ? 1 : -1, sy = dir.y > 0 ? 1 : -1, sz = dir.z > 0 ? 1 : -1;
+    // distance to the next cell boundary, and per-cell distance, on each axis
+    float tdx = dir.x != 0 ? fabsf(1.0f/dir.x) : 1e30f;
+    float tdy = dir.y != 0 ? fabsf(1.0f/dir.y) : 1e30f;
+    float tdz = dir.z != 0 ? fabsf(1.0f/dir.z) : 1e30f;
+    float tx = (dir.x > 0 ? (x+1-origin.x) : (origin.x-x)) * tdx;
+    float ty = (dir.y > 0 ? (y+1-origin.y) : (origin.y-y)) * tdy;
+    float tz = (dir.z > 0 ? (z+1-origin.z) : (origin.z-z)) * tdz;
+    for (float t = 0; t <= max_dist; ) {
+        if (world_solid(x, y, z)) {
+            h.hit = 1; h.bx=x; h.by=y; h.bz=z; h.px=px; h.py=py; h.pz=pz; return h;
+        }
+        px = x; py = y; pz = z; // remember last empty cell for placement
+        if (tx <= ty && tx <= tz)      { x += sx; t = tx; tx += tdx; }
+        else if (ty <= tz)             { y += sy; t = ty; ty += tdy; }
+        else                           { z += sz; t = tz; tz += tdz; }
+    }
+    return h; // h.hit == 0
+}

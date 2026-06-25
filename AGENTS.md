@@ -9,14 +9,14 @@ Dependencies point one way only. Never add a back-edge (e.g. `world` must not in
 render or sokol). Enforced by CMake `target_link_libraries`.
 
 ```
-core  ← world      core  ← player      core, world ← render      all ← main
+core ← world      core, world ← player      core, world ← render      all ← main
 ```
 
 - `src/core`   — `hmath.h` (vec/mat), `config.h` (dimensions), sokol impl unit.
-- `src/world`  — `world.h`: voxel grid + terrain gen. Pure data, no graphics.
-- `src/player` — `player.h`: fly camera; host feeds it `player_input`.
-- `src/render` — `render.h`: meshes the world (face culling) and draws it.
-- `src/main.c` — window, input plumbing, frame loop.
+- `src/world`  — `world.h`: voxel grid, terrain gen, edits, raycast. Pure data, no graphics.
+- `src/player` — `player.h`: FPS controller (physics, collision, fly); host feeds `player_input`.
+- `src/render` — `render.h`: chunked indexed meshing + frustum culling.
+- `src/main.c` — window, input, block edits, HUD, frame loop.
 
 ## Conventions
 

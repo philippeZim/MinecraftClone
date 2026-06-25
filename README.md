@@ -1,7 +1,10 @@
 # minecraft_clone
 
 A minimal voxel game in C using [sokol](https://github.com/floooh/sokol) (GL backend).
-First slice: procedurally generated terrain + a free-fly player camera.
+
+Features: procedural terrain, chunked indexed meshing with hidden-face culling and
+frustum culling, walking physics (gravity, jumping, AABB-vs-voxel collision) plus a
+creative fly mode, block break/place via voxel raycast, and an FPS + coordinates HUD.
 
 ## Build & run (Linux)
 
@@ -16,14 +19,17 @@ Requires a C compiler, CMake ≥ 3.16, and X11 + GL dev headers
 
 ## Controls
 
-| Input            | Action          |
-|------------------|-----------------|
-| `W A S D`        | move            |
-| `Space` / `Ctrl` | up / down       |
-| `Shift`          | sprint          |
-| mouse            | look            |
-| click            | re-capture mouse|
-| `Esc`            | release mouse   |
+| Input         | Action                         |
+|---------------|--------------------------------|
+| `W A S D`     | move                           |
+| `Space`       | jump (or ascend while flying)  |
+| `Shift`       | descend while flying           |
+| `Ctrl`        | sprint                         |
+| `F`           | toggle fly                     |
+| mouse         | look                           |
+| left click    | break block                    |
+| right click   | place block                    |
+| `Esc`         | release mouse (click to recapture) |
 
 ## Architecture (modular by design)
 
@@ -32,10 +38,10 @@ dependency, so an agent can work on one module knowing only its header + deps.
 
 ```
 core    src/core    math (hmath.h), config.h, sokol implementation unit   deps: sokol
-world   src/world   voxel storage + terrain generation (no graphics)      deps: core
-player  src/player  input-agnostic fly camera                             deps: core
-render  src/render  builds GPU mesh from world, draws with sokol_gfx       deps: core, world
-main    src/main.c  window/lifecycle; the only place modules meet          deps: all
+world   src/world   voxel storage, terrain gen, edits, raycast (no gfx)   deps: core
+player  src/player  FPS controller: physics, collision, fly mode          deps: core, world
+render  src/render  chunked indexed meshing + frustum culling             deps: core, world
+main    src/main.c  window/lifecycle, input, block edits, HUD             deps: all
 ```
 
 See each module's `AGENTS.md` for its contract. Tunables live in `src/core/config.h`.

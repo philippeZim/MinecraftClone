@@ -24,7 +24,7 @@ target_link_libraries(world PRIVATE core)            # config.h only
 
 add_library(player STATIC src/player/player.c)
 target_include_directories(player PUBLIC src/player)
-target_link_libraries(player PRIVATE core)            # hmath.h only
+target_link_libraries(player PUBLIC core PRIVATE world)  # hmath.h + collision queries
 
 add_library(render STATIC src/render/render.c)
 target_include_directories(render PUBLIC src/render)

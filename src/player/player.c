@@ -1,42 +1,79 @@
 #include "player.h"
+#include "world.h"
 
-#define MOVE_SPEED   12.0f   // blocks/second
-#define SPRINT_MULT  2.5f
-#define LOOK_SENS    0.0025f // radians per mouse pixel
-#define PITCH_LIMIT  1.553f  // ~89 degrees, avoid gimbal flip
+#define HW         0.3f    // player half-width (x/z)
+#define PH         1.8f    // player height
+#define EYE        1.62f   // eye height above feet
+#define WALK       5.0f    // blocks/second
+#define SPRINT     1.8f    // sprint multiplier
+#define FLY_SPEED  14.0f
+#define GRAVITY    28.0f
+#define JUMP_VEL   8.4f    // ~1.25 block jump
+#define LOOK_SENS  0.0025f
+#define PITCH_LIM  1.553f
 
-static struct { vec3 pos; float yaw, pitch; } g_cam;
+static struct {
+    vec3 pos;            // feet position (x/z centred, y at the bottom)
+    vec3 vel;
+    float yaw, pitch;
+    int on_ground, fly;
+} p;
 
-static vec3 forward_dir(void) {
-    float cp = cosf(g_cam.pitch);
-    return v3(cosf(g_cam.yaw)*cp, sinf(g_cam.pitch), sinf(g_cam.yaw)*cp);
+static vec3 look_dir(void) {
+    float cp = cosf(p.pitch);
+    return v3(cosf(p.yaw)*cp, sinf(p.pitch), sinf(p.yaw)*cp);
 }
 
-void player_init(vec3 start_pos) {
-    g_cam.pos = start_pos;
-    g_cam.yaw = -1.57f; // face -z
-    g_cam.pitch = -0.3f;
+// True if the player AABB at feet-position `q` overlaps any solid voxel.
+static int collide(vec3 q) {
+    for (int x = (int)floorf(q.x-HW); x <= (int)floorf(q.x+HW); ++x)
+    for (int y = (int)floorf(q.y);    y <= (int)floorf(q.y+PH); ++y)
+    for (int z = (int)floorf(q.z-HW); z <= (int)floorf(q.z+HW); ++z)
+        if (world_solid(x, y, z)) return 1;
+    return 0;
 }
+
+void player_init(vec3 feet_start) {
+    p.pos = feet_start; p.vel = v3(0,0,0);
+    p.yaw = -1.57f; p.pitch = -0.2f; p.on_ground = 0; p.fly = 0;
+}
+
+void player_toggle_fly(void) { p.fly = !p.fly; p.vel.y = 0; }
 
 void player_update(const player_input *in, float dt) {
-    g_cam.yaw   += in->mouse_dx * LOOK_SENS;
-    g_cam.pitch -= in->mouse_dy * LOOK_SENS;
-    if (g_cam.pitch >  PITCH_LIMIT) g_cam.pitch =  PITCH_LIMIT;
-    if (g_cam.pitch < -PITCH_LIMIT) g_cam.pitch = -PITCH_LIMIT;
+    p.yaw   += in->mouse_dx * LOOK_SENS;
+    p.pitch -= in->mouse_dy * LOOK_SENS;
+    if (p.pitch >  PITCH_LIM) p.pitch =  PITCH_LIM;
+    if (p.pitch < -PITCH_LIM) p.pitch = -PITCH_LIM;
 
-    vec3 fwd = forward_dir();
-    vec3 right = v3_norm(v3_cross(fwd, v3(0, 1, 0)));
-    vec3 wish = v3(0, 0, 0);
-    wish = v3_add(wish, v3_scale(fwd,   (float)(in->forward - in->back)));
-    wish = v3_add(wish, v3_scale(right, (float)(in->right - in->left)));
-    wish = v3_add(wish, v3_scale(v3(0,1,0), (float)(in->up - in->down)));
+    // Horizontal wish direction is yaw-only so looking up/down never slows you.
+    vec3 flat = v3_norm(v3(cosf(p.yaw), 0, sinf(p.yaw)));
+    vec3 right = v3_norm(v3_cross(flat, v3(0,1,0)));
+    vec3 wish = v3_add(v3_scale(flat, (float)(in->forward - in->back)),
+                       v3_scale(right, (float)(in->right - in->left)));
+    wish = v3_norm(wish);
 
-    float speed = MOVE_SPEED * (in->sprint ? SPRINT_MULT : 1.0f);
-    g_cam.pos = v3_add(g_cam.pos, v3_scale(v3_norm(wish), speed * dt));
+    float speed = (p.fly ? FLY_SPEED : WALK) * (in->sprint ? SPRINT : 1.0f);
+    p.vel.x = wish.x * speed;
+    p.vel.z = wish.z * speed;
+
+    if (p.fly) {
+        p.vel.y = (float)(in->up - in->down) * FLY_SPEED;
+    } else {
+        p.vel.y -= GRAVITY * dt;
+        if (in->up && p.on_ground) { p.vel.y = JUMP_VEL; p.on_ground = 0; }
+    }
+
+    // Integrate per-axis, reverting the axis on collision (cheap swept AABB).
+    vec3 np = p.pos;
+    np.x += p.vel.x * dt; if (collide(np)) { np.x = p.pos.x; p.vel.x = 0; }
+    np.z += p.vel.z * dt; if (collide(np)) { np.z = p.pos.z; p.vel.z = 0; }
+    np.y += p.vel.y * dt;
+    if (collide(np)) { p.on_ground = (p.vel.y <= 0); np.y = p.pos.y; p.vel.y = 0; }
+    else if (!p.fly) p.on_ground = 0;
+    p.pos = np;
 }
 
-mat4 player_view(void) {
-    return m4_lookat(g_cam.pos, v3_add(g_cam.pos, forward_dir()), v3(0, 1, 0));
-}
-
-vec3 player_eye(void) { return g_cam.pos; }
+vec3 player_eye(void)     { return v3(p.pos.x, p.pos.y + EYE, p.pos.z); }
+vec3 player_forward(void) { return look_dir(); }
+mat4 player_view(void)    { vec3 e = player_eye(); return m4_lookat(e, v3_add(e, look_dir()), v3(0,1,0)); }

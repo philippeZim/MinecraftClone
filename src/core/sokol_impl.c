@@ -7,3 +7,5 @@
 #include "sokol_glue.h"
 #include "sokol_log.h"
 #include "sokol_time.h"
+#define SOKOL_DEBUGTEXT_IMPL
+#include "sokol_debugtext.h"
