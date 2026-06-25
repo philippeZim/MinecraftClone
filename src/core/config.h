@@ -8,9 +8,9 @@
 #define CHUNK_SY 256                 // chunk/world height (y) — room for deep oceans + tall snow-capped mountains
 #define WORLD_SY CHUNK_SY
 
-#define LOAD_RADIUS   7   // chunks generated around the player in every direction (streaming window)
-#define RENDER_RADIUS 6   // chunks meshed/drawn — one less than load so meshed chunks always have neighbours
-#define GRID 16           // ring size: power-of-two ≥ 2*LOAD_RADIUS+1, indexes the loaded-chunk window
+#define LOAD_RADIUS   13  // chunks generated around the player in every direction (streaming window)
+#define RENDER_RADIUS 12  // chunks meshed/drawn — one less than load so meshed chunks always have neighbours
+#define GRID 32           // ring size: power-of-two ≥ 2*LOAD_RADIUS+1, indexes the loaded-chunk window
 #define GRID_MASK (GRID - 1)
 
 #define SEA_LEVEL 63      // water fills air at/below this height (Minecraft 1.18+ value)
