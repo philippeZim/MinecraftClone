@@ -136,7 +136,7 @@ void render_frame(mat4 view_proj) {
     for (int cx = 0; cx < NCX; ++cx)
     for (int cz = 0; cz < NCZ; ++cz) {
         chunk *ch = &g_r.chunks[cx][cz];
-        if (!ch->index_count) continue;
+        if (!ch->index_count || !ch->vb.id) continue; // skip empty / failed-alloc chunks
         if (!aabb_visible(pl, cx*CHUNK_SX,0,cz*CHUNK_SZ, (cx+1)*CHUNK_SX,WORLD_SY,(cz+1)*CHUNK_SZ)) continue;
         sg_apply_bindings(&(sg_bindings){ .vertex_buffers[0]=ch->vb, .index_buffer=ch->ib });
         sg_draw(0, ch->index_count, 1);

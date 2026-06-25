@@ -29,7 +29,10 @@ static vec3 spawn_point(void) {
 
 static void init(void) {
     stm_setup();
-    sg_setup(&(sg_desc){ .environment = sglue_environment(), .logger.func = slog_func });
+    // 2 buffers per chunk + sokol_debugtext's own buffers exceed the default 128-slot
+    // pool, so size it generously (cheap; leaves headroom for edit-time rebuild churn).
+    sg_setup(&(sg_desc){ .environment = sglue_environment(), .logger.func = slog_func,
+                         .buffer_pool_size = 1024 });
     sdtx_setup(&(sdtx_desc_t){ .fonts[0] = sdtx_font_c64(), .logger.func = slog_func });
     world_init(1337);
     render_init();
