@@ -10,9 +10,10 @@ Public contract: `render.h`
 - `render_after_edit(x,z)` — rebuild the edited chunk (+ border neighbours) after a block change.
 - `render_shutdown()`.
 
-Deps: `core` (hmath, sokol_gfx) + `world` (reads blocks). Vertex = pos3+normal3+color3,
+Deps: `core` (hmath, sokol_gfx) + `world` (reads blocks). Vertex = pos3 float + packed
+RGBA8 (16 bytes); face shading is baked into the colour so there is no per-vertex normal.
 uint32 indices. Shaders are embedded GLSL 410. `build_chunk` uses **greedy meshing**
 (coplanar same-block faces merge into one quad via a signed face mask; winding fixed by a
 cross-product test against the face normal). Frustum planes via Gribb-Hartmann.
 
-Likely next work: texture atlas, async/threaded chunk builds, transparency, packed vertices.
+Likely next work: texture atlas, async/threaded chunk builds, transparency, byte-packed positions.

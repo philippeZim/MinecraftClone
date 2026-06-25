@@ -5,8 +5,12 @@
 #include <stdlib.h>
 #include <math.h>
 
-// Interleaved vertex: position(3) + normal(3) + color(3) = 9 floats.
-typedef struct { float px,py,pz, nx,ny,nz, r,g,b; } vertex;
+// Interleaved vertex: position(3 floats) + packed RGBA8 colour = 16 bytes. Face shading
+// is baked into the colour at mesh time, so no per-vertex normal/lighting is needed.
+typedef struct { float px,py,pz; uint32_t rgba; } vertex;
+static inline uint32_t pack_rgb(float r, float g, float b) {
+    return (uint32_t)(r*255) | (uint32_t)(g*255)<<8 | (uint32_t)(b*255)<<16 | 0xFF000000u;
+}
 
 #define NCX WORLD_CHUNKS_X
 #define NCZ WORLD_CHUNKS_Z
@@ -84,11 +88,11 @@ static void build_chunk(int cx, int cz) {
                 if (v3_dot(v3_cross(v3_sub(c1,c0), v3_sub(c3,c0)), N) < 0) { vec3 t=c1; c1=c3; c3=t; }
                 float sh = N.y>0 ? 1.0f : N.y<0 ? 0.55f : (N.x!=0 ? 0.8f : 0.65f);
                 const float *col = BLOCK_COLOR[c<0 ? -c : c];
-                float r=col[0]*sh, g=col[1]*sh, b=col[2]*sh;
+                uint32_t rgba = pack_rgb(col[0]*sh, col[1]*sh, col[2]*sh);
                 reserve(4);
                 uint32_t bi = (uint32_t)ssvlen;
                 vec3 cs[4] = { c0,c1,c2,c3 };
-                for (int q=0;q<4;++q) sv[ssvlen++] = (vertex){ cs[q].x,cs[q].y,cs[q].z, N.x,N.y,N.z, r,g,b };
+                for (int q=0;q<4;++q) sv[ssvlen++] = (vertex){ cs[q].x,cs[q].y,cs[q].z, rgba };
                 uint32_t qi[6] = { bi,bi+1,bi+2, bi,bi+2,bi+3 };
                 for (int q=0;q<6;++q) si[ssilen++] = qi[q];
                 for (int l=0;l<h;++l) for (int k=0;k<w;++k) g_mask[n+k+l*wdim] = 0;
@@ -105,12 +109,8 @@ static void build_chunk(int cx, int cz) {
 
 static const char *VS =
     "#version 410\n"
-    "uniform mat4 mvp;\n in vec3 position;\n in vec3 normal;\n in vec3 color0;\n out vec3 v_color;\n"
-    "void main(){\n"
-    "  gl_Position = mvp * vec4(position,1.0);\n"
-    "  float d = max(dot(normalize(normal), normalize(vec3(0.5,1.0,0.3))), 0.0);\n"
-    "  v_color = color0 * (0.5 + 0.5*d);\n"
-    "}\n";
+    "uniform mat4 mvp;\n in vec3 position;\n in vec4 color0;\n out vec3 v_color;\n"
+    "void main(){ gl_Position = mvp * vec4(position,1.0); v_color = color0.rgb; }\n";
 static const char *FS =
     "#version 410\n"
     "in vec3 v_color;\n out vec4 frag_color;\n"
@@ -120,14 +120,14 @@ void render_init(void) {
     sg_shader shd = sg_make_shader(&(sg_shader_desc){
         .vertex_func   = { .source = VS },
         .fragment_func = { .source = FS },
-        .attrs = { [0].glsl_name="position", [1].glsl_name="normal", [2].glsl_name="color0" },
+        .attrs = { [0].glsl_name="position", [1].glsl_name="color0" },
         .uniform_blocks[0] = { .stage = SG_SHADERSTAGE_VERTEX, .size = sizeof(mat4),
                                .glsl_uniforms[0] = { .type=SG_UNIFORMTYPE_MAT4, .glsl_name="mvp" } },
         .label = "world-shader",
     });
     g_r.pip = sg_make_pipeline(&(sg_pipeline_desc){
         .shader = shd,
-        .layout.attrs = { [0].format=SG_VERTEXFORMAT_FLOAT3, [1].format=SG_VERTEXFORMAT_FLOAT3, [2].format=SG_VERTEXFORMAT_FLOAT3 },
+        .layout.attrs = { [0].format=SG_VERTEXFORMAT_FLOAT3, [1].format=SG_VERTEXFORMAT_UBYTE4N },
         .index_type = SG_INDEXTYPE_UINT32,
         .depth = { .compare = SG_COMPAREFUNC_LESS_EQUAL, .write_enabled = true },
         .cull_mode = SG_CULLMODE_BACK,
