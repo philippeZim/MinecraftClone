@@ -42,7 +42,7 @@ enum { TX_GRASS_SIDE = BLOCK_COUNT, TX_LOG_TOP, TX_COUNT };
 static const char *TEX_FILE[TX_COUNT] = {
     0, "textures/grass.png", "textures/dirt.png", "textures/stone.png",
     "textures/sand.png", "textures/water.png", "textures/wood.png", "textures/leaves.png",
-    "textures/grass_side.png", "textures/log_top.png" };
+    "textures/snow.png", "textures/grass_side.png", "textures/log_top.png" };
 // Per-layer tint for loaded textures (white = texture's own colour). Minecraft ships grass/leaves/water
 // greyscale and tints them by biome at runtime — we bake a friendly plains-style tint here instead.
 static const float TINT[TX_COUNT][3] = {
@@ -54,6 +54,7 @@ static const float TINT[TX_COUNT][3] = {
     {0.30f,0.52f,0.92f},      // WATER  blue
     {1,1,1},                  // WOOD
     {0.45f,0.72f,0.32f},      // LEAVES foliage green
+    {1,1,1},                  // SNOW
     {1,1,1},                  // GRASS_SIDE (green fringe already baked in this pack)
     {1,1,1},                  // LOG_TOP
 };
@@ -66,6 +67,7 @@ static const float BASE[TX_COUNT][4] = {          // procedural-fallback colours
     {0.40f,0.69f,0.95f,0.62f},  // WATER  light sky-blue, translucent
     {0.68f,0.53f,0.37f,1.0f},   // WOOD   light bark
     {0.55f,0.81f,0.49f,1.0f},   // LEAVES soft light green
+    {0.93f,0.96f,0.99f,1.0f},   // SNOW   bright white
     {0.64f,0.48f,0.34f,1.0f},   // GRASS_SIDE fallback → dirt
     {0.80f,0.65f,0.45f,1.0f},   // LOG_TOP    fallback → pale wood end-grain
 };
@@ -125,7 +127,8 @@ static int g_mask[MASK_MAX];
 // Greedy-mesh one pass of chunk (cx,cz) into the scratch buffers. pass 0 = opaque blocks;
 // pass 1 = water, where a face shows only against AIR (so water hidden under terrain/itself).
 static void mesh(int cx, int cz, int water) {
-    int dims[3] = { CHUNK_SX, WORLD_SY, CHUNK_SZ };
+    int ytop = world_chunk_ymax(cx, cz) + 1; if (ytop > WORLD_SY) ytop = WORLD_SY;  // skip empty sky above the terrain
+    int dims[3] = { CHUNK_SX, ytop, CHUNK_SZ };
     int off[3]  = { cx*CHUNK_SX, 0, cz*CHUNK_SZ };
     for (int d = 0; d < 3; ++d) {
         int u = (d+1)%3, v = (d+2)%3, wdim = dims[u], hdim = dims[v], p[3];
@@ -297,7 +300,8 @@ void render_frame(mat4 view_proj) {
         rchunk *ch = &g_r.chunks[i];
         if (!ch->have || !ch->icount) continue;
         if (abs(ch->cx-g_r.ccx) > RENDER_RADIUS || abs(ch->cz-g_r.ccz) > RENDER_RADIUS) continue; // stale far slot
-        if (!aabb_visible(pl, ch->cx*CHUNK_SX,0,ch->cz*CHUNK_SZ, (ch->cx+1)*CHUNK_SX,WORLD_SY,(ch->cz+1)*CHUNK_SZ)) continue;
+        int ytop = world_chunk_ymax(ch->cx, ch->cz); if (ytop < 1) ytop = 1;   // AABB cap: skip empty sky
+        if (!aabb_visible(pl, ch->cx*CHUNK_SX,0,ch->cz*CHUNK_SZ, (ch->cx+1)*CHUNK_SX,ytop,(ch->cz+1)*CHUNK_SZ)) continue;
         sg_apply_bindings(&(sg_bindings){ .vertex_buffers[0]=ch->vb, .index_buffer=ch->ib,
                                           .views[0]=g_r.tex_view, .samplers[0]=g_r.smp });
         sg_draw(0, ch->icount, 1);
@@ -309,7 +313,8 @@ void render_frame(mat4 view_proj) {
         rchunk *ch = &g_r.chunks[i];
         if (!ch->have || !ch->wcount) continue;
         if (abs(ch->cx-g_r.ccx) > RENDER_RADIUS || abs(ch->cz-g_r.ccz) > RENDER_RADIUS) continue;
-        if (!aabb_visible(pl, ch->cx*CHUNK_SX,0,ch->cz*CHUNK_SZ, (ch->cx+1)*CHUNK_SX,WORLD_SY,(ch->cz+1)*CHUNK_SZ)) continue;
+        int ytop = world_chunk_ymax(ch->cx, ch->cz); if (ytop < 1) ytop = 1;
+        if (!aabb_visible(pl, ch->cx*CHUNK_SX,0,ch->cz*CHUNK_SZ, (ch->cx+1)*CHUNK_SX,ytop,(ch->cz+1)*CHUNK_SZ)) continue;
         sg_apply_bindings(&(sg_bindings){ .vertex_buffers[0]=ch->wvb, .index_buffer=ch->wib,
                                           .views[0]=g_r.tex_view, .samplers[0]=g_r.smp });
         sg_draw(0, ch->wcount, 1);

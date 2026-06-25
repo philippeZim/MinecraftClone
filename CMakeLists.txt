@@ -18,7 +18,7 @@ target_include_directories(core PUBLIC src/core)
 target_link_libraries(core PUBLIC sokol)
 
 # --- modules: each owns its headers, declares only the deps it truly needs --------
-add_library(world  STATIC src/world/world.c)
+add_library(world  STATIC src/world/world.c src/world/terrain.c)
 target_include_directories(world PUBLIC src/world)
 target_link_libraries(world PRIVATE core)            # config.h only
 

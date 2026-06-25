@@ -6,6 +6,7 @@
 #define EYE        1.62f   // eye height above feet
 #define WALK       5.0f    // blocks/second
 #define SPRINT     1.8f    // sprint multiplier
+#define BOOST      4.0f    // Q-held burst multiplier (fast fly / fast run for exploring)
 #define FLY_SPEED  14.0f
 #define GRAVITY    28.0f
 #define JUMP_VEL   8.4f    // ~1.25 block jump
@@ -57,13 +58,14 @@ void player_update(const player_input *in, float dt) {
     // Submerged when a solid block of water sits at chest height — swim instead of walk.
     int wet = world_block((int)floorf(p.pos.x), (int)floorf(p.pos.y + 1.0f), (int)floorf(p.pos.z)) == BLOCK_WATER;
 
-    float speed = (p.fly ? FLY_SPEED : WALK) * (in->sprint ? SPRINT : 1.0f);
+    float boost = in->boost ? BOOST : 1.0f;
+    float speed = (p.fly ? FLY_SPEED : WALK) * (in->sprint ? SPRINT : 1.0f) * boost;
     if (wet && !p.fly) speed *= 0.6f;     // water resistance
     p.vel.x = wish.x * speed;
     p.vel.z = wish.z * speed;
 
     if (p.fly) {
-        p.vel.y = (float)(in->up - in->down) * FLY_SPEED;
+        p.vel.y = (float)(in->up - in->down) * FLY_SPEED * boost;
     } else if (wet) {
         p.vel.y -= GRAVITY * 0.18f * dt;                       // buoyant: slow sink
         if (in->up)   p.vel.y = SWIM_SPEED;                    // swim up

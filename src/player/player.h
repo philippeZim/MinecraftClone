@@ -10,6 +10,7 @@ typedef struct {
     int   forward, back, left, right; // movement keys held (0/1)
     int   up, down;                   // jump / ascend, crouch / descend
     int   sprint;                     // speed multiplier
+    int   boost;                      // extra speed burst (fast fly / fast run) for quick exploration
     float mouse_dx, mouse_dy;         // mouse delta accumulated this frame
 } player_input;
 

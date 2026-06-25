@@ -1,4 +1,5 @@
 #include "world.h"
+#include "terrain.h"
 #include "config.h"
 #include <math.h>
 #include <string.h>
@@ -6,55 +7,33 @@
 // Infinite world: a fixed GRID×GRID ring of chunks slides with the player. Each slot holds
 // whichever chunk currently maps onto it (cx&MASK, cz&MASK); a stale slot reads as air until
 // regenerated. Chunks are pure noise so revisiting regenerates identical terrain (no save).
-typedef struct { int cx, cz, loaded; uint8_t blocks[CHUNK_SX * WORLD_SY * CHUNK_SZ]; } chunk_t;
+// `ymax` caches the tallest non-air cell so the mesher can cap its vertical sweep over empty sky.
+typedef struct { int cx, cz, loaded, ymax; uint8_t blocks[CHUNK_SX * WORLD_SY * CHUNK_SZ]; } chunk_t;
 static chunk_t  g_chunks[GRID * GRID];
-static uint32_t g_seed;
 
 static inline int      lidx(int lx, int y, int lz) { return (lx * WORLD_SY + y) * CHUNK_SZ + lz; }
 static inline chunk_t *slot(int cx, int cz) { return &g_chunks[(cx & GRID_MASK) * GRID + (cz & GRID_MASK)]; }
 
-// Cheap deterministic hash -> [0,1). Good enough for value-noise terrain + feature placement.
-static float hash2(int x, int z, uint32_t seed) {
-    uint32_t h = (uint32_t)x * 374761393u + (uint32_t)z * 668265263u + seed * 2246822519u;
-    h = (h ^ (h >> 13)) * 1274126177u;
-    return (float)(h & 0xFFFFFF) / (float)0x1000000;
-}
-
-// Smoothed value noise: bilinearly interpolate hashed lattice corners.
-static float value_noise(float x, float z, uint32_t seed) {
-    int xi = (int)floorf(x), zi = (int)floorf(z);
-    float fx = x - xi, fz = z - zi;
-    float u = fx*fx*(3.0f - 2.0f*fx), v = fz*fz*(3.0f - 2.0f*fz);
-    float a = hash2(xi, zi, seed),     b = hash2(xi+1, zi, seed);
-    float c = hash2(xi, zi+1, seed),   d = hash2(xi+1, zi+1, seed);
-    return (a*(1-u) + b*u)*(1-v) + (c*(1-u) + d*u)*v;
-}
-
-static int height_at(int gx, int gz) {
-    float n = value_noise(gx*0.012f, gz*0.012f, g_seed) * 0.6f   // broad rolling hills
-            + value_noise(gx*0.05f,  gz*0.05f,  g_seed) * 0.3f   // medium detail
-            + value_noise(gx*0.13f,  gz*0.13f,  g_seed) * 0.1f;  // fine roughness
-    int h = (int)(SEA_LEVEL - 5 + n * 30.0f);
-    return h < 1 ? 1 : h >= WORLD_SY ? WORLD_SY-1 : h;
-}
-
-// Fill one chunk's blocks straight from noise: stone/dirt/grass columns, sand beaches,
-// water up to sea level, and the odd tree (kept fully inside the chunk so no cross-chunk writes).
+// Fill one chunk from the terrain sampler: stone/sub/top columns, water up to each column's
+// water level, and the odd tree (kept fully inside the chunk so no cross-chunk writes). Caches
+// the tallest non-air cell in ymax so the mesher can skip the empty sky above.
 static void gen_chunk(chunk_t *c, int cx, int cz) {
     memset(c->blocks, BLOCK_AIR, sizeof c->blocks);
-    int ox = cx*CHUNK_SX, oz = cz*CHUNK_SZ;
+    int ox = cx*CHUNK_SX, oz = cz*CHUNK_SZ, ymax = 1;
     for (int lx = 0; lx < CHUNK_SX; ++lx)
     for (int lz = 0; lz < CHUNK_SZ; ++lz) {
-        int gx = ox+lx, gz = oz+lz, h = height_at(gx, gz), land = h > SEA_LEVEL;
+        int gx = ox+lx, gz = oz+lz;
+        terrain_col t = terrain_at(gx, gz);
+        int h = t.surface;
         for (int y = 0; y <= h; ++y)
-            c->blocks[lidx(lx,y,lz)] = (y == h)   ? (land ? BLOCK_GRASS : BLOCK_SAND)
-                                     : (y > h-4)  ? (land ? BLOCK_DIRT  : BLOCK_SAND) : BLOCK_STONE;
-        for (int y = h+1; y <= SEA_LEVEL; ++y) c->blocks[lidx(lx,y,lz)] = BLOCK_WATER;
+            c->blocks[lidx(lx,y,lz)] = (y == h) ? t.top : (y >= h-3) ? t.sub : BLOCK_STONE;
+        for (int y = h+1; y <= t.water; ++y) c->blocks[lidx(lx,y,lz)] = BLOCK_WATER;
+        int col_top = t.water > h ? t.water : h;
 
-        if (land && h+1 <= WORLD_SY-7 && lx >= 2 && lx < CHUNK_SX-2 && lz >= 2 && lz < CHUNK_SZ-2
-            && hash2(gx, gz, g_seed ^ 0x9e37u) > 0.985f) {              // ~1.5% of land columns
-            int th = 4 + (int)(hash2(gx, gz, g_seed ^ 0x1234u) * 3), top = h + th;
-            for (int t = 1; t <= th; ++t) c->blocks[lidx(lx, h+t, lz)] = BLOCK_WOOD;
+        if (t.tree && h+7 <= WORLD_SY-1 && lx >= 2 && lx < CHUNK_SX-2 && lz >= 2 && lz < CHUNK_SZ-2
+            && terrain_hash(gx, gz, 0x9e37u) > 0.985f) {               // ~1.5% of forest columns
+            int th = 4 + (int)(terrain_hash(gx, gz, 0x1234u) * 3), top = h + th;
+            for (int s = 1; s <= th; ++s) c->blocks[lidx(lx, h+s, lz)] = BLOCK_WOOD;
             for (int dy = -2; dy <= 1; ++dy)
             for (int dx = -2; dx <= 2; ++dx)
             for (int dz = -2; dz <= 2; ++dz)
@@ -62,12 +41,15 @@ static void gen_chunk(chunk_t *c, int cx, int cz) {
                     int j = lidx(lx+dx, top+dy, lz+dz);
                     if (c->blocks[j] == BLOCK_AIR) c->blocks[j] = BLOCK_LEAVES;
                 }
+            if (top+1 > col_top) col_top = top+1;
         }
+        if (col_top > ymax) ymax = col_top;
     }
+    c->ymax = ymax;
 }
 
 void world_init(uint32_t seed) {
-    g_seed = seed;
+    terrain_init(seed);
     for (int i = 0; i < GRID*GRID; ++i) g_chunks[i].loaded = 0;
 }
 
@@ -100,7 +82,15 @@ void world_set_block(int x, int y, int z, uint8_t b) {
     if ((unsigned)y >= (unsigned)WORLD_SY) return;
     int cx = CX_OF(x), cz = CX_OF(z);
     chunk_t *c = slot(cx, cz);
-    if (c->loaded && c->cx == cx && c->cz == cz) c->blocks[lidx(LX_OF(x), y, LX_OF(z))] = b;
+    if (c->loaded && c->cx == cx && c->cz == cz) {
+        c->blocks[lidx(LX_OF(x), y, LX_OF(z))] = b;
+        if (b != BLOCK_AIR && y >= c->ymax) c->ymax = y+1;   // grow the mesh cap to cover a block placed up high
+    }
+}
+
+int world_chunk_ymax(int cx, int cz) {
+    chunk_t *c = slot(cx, cz);
+    return (c->loaded && c->cx == cx && c->cz == cz) ? c->ymax : WORLD_SY-1;
 }
 
 // Amanatides & Woo voxel DDA: step the integer cell along `dir` until a solid hit.

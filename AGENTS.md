@@ -13,7 +13,8 @@ core ← world      core, world ← player      core, world ← render      all 
 ```
 
 - `src/core`   — `hmath.h` (vec/mat), `config.h` (dimensions), sokol impl unit.
-- `src/world`  — `world.h`: voxel grid, terrain gen, edits, raycast. Pure data, no graphics.
+- `src/world`  — `world.h`: voxel grid, edits, raycast. Pure data, no graphics. Internal
+  `terrain.{h,c}`: stateless per-column generator (continents, mountains, rivers/lakes, biomes).
 - `src/player` — `player.h`: FPS controller (physics, collision, fly); host feeds `player_input`.
 - `src/render` — `render.h`: chunked indexed meshing + frustum culling.
 - `src/main.c` — window, input, block edits, HUD, frame loop.

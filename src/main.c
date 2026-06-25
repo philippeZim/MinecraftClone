@@ -20,11 +20,17 @@ static struct {
     float        fps;   // smoothed frames/second for the HUD
 } g;
 
-// Drop the player onto the surface near the world origin (its chunk must be loaded first).
+// Drop the player onto dry land near the world origin (its chunks must be loaded first): scan a
+// scatter of nearby columns and take the first whose surface sits above sea level, so we never
+// spawn underwater. Falls back to the origin column if the whole neighbourhood is ocean.
 static vec3 spawn_point(void) {
-    int x = 8, z = 8;
-    int y = WORLD_SY-1; while (y > 0 && !world_solid(x, y, z)) --y;
-    return v3(x + 0.5f, (float)(y + 1), z + 0.5f);
+    for (int r = 0; r < 96; ++r) {
+        int x = 8 + (r*131 % 161) - 80, z = 8 + (r*197 % 161) - 80;   // scattered samples in the loaded window
+        int y = WORLD_SY-1; while (y > 0 && !world_solid(x, y, z)) --y;
+        if (y > SEA_LEVEL) return v3(x + 0.5f, (float)(y + 1), z + 0.5f);
+    }
+    int y = WORLD_SY-1; while (y > 0 && !world_solid(8, y, 8)) --y;
+    return v3(8.5f, (float)(y + 1), 8.5f);
 }
 
 static void init(void) {
@@ -100,6 +106,7 @@ static void event(const sapp_event *e) {
         case SAPP_KEYCODE_SPACE:       g.in.up      = down; break;
         case SAPP_KEYCODE_LEFT_SHIFT:  g.in.down    = down; break;
         case SAPP_KEYCODE_LEFT_CONTROL:g.in.sprint  = down; break;
+        case SAPP_KEYCODE_Q:           g.in.boost   = down; break;
         case SAPP_KEYCODE_F:           if (down) player_toggle_fly(); break;
         case SAPP_KEYCODE_ESCAPE:      if (down) { g.locked = 0; sapp_lock_mouse(false); } break;
         default: break;
