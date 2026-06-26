@@ -19,7 +19,6 @@ uint8_t world_block(int x, int y, int z);          // BLOCK_AIR when out of boun
 int     world_solid(int x, int y, int z);          // 1 only for collidable blocks (air & water are not solid)
 void    world_set_block(int x, int y, int z, uint8_t b); // edit a cell (no-op if unloaded / out of bounds)
 int     world_chunk_ymax(int cx, int cz);          // highest non-air y in a loaded chunk; lets the mesher skip empty sky
-const void* world_chunk_ptr(int cx, int cz);       // raw read-only view into a loaded chunk, or NULL; internal: mesher fast-path
 world_hit world_raycast(vec3 origin, vec3 dir, float max_dist); // DDA voxel pick (passes through water)
 
 #endif // WORLD_H

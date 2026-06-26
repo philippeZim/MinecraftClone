@@ -8,7 +8,6 @@
 // whichever chunk currently maps onto it (cx&MASK, cz&MASK); a stale slot reads as air until
 // regenerated. Chunks are pure noise so revisiting regenerates identical terrain (no save).
 // `ymax` caches the tallest non-air cell so the mesher can cap its vertical sweep over empty sky.
-// MIRROR: `local_chunk_t` in src/render/render.c must stay byte-identical to this struct.
 typedef struct { int cx, cz, loaded, ymax; uint8_t blocks[CHUNK_SX * WORLD_SY * CHUNK_SZ]; } chunk_t;
 static chunk_t  g_chunks[GRID * GRID];
 
@@ -92,11 +91,6 @@ void world_set_block(int x, int y, int z, uint8_t b) {
 int world_chunk_ymax(int cx, int cz) {
     chunk_t *c = slot(cx, cz);
     return (c->loaded && c->cx == cx && c->cz == cz) ? c->ymax : WORLD_SY-1;
-}
-
-const void* world_chunk_ptr(int cx, int cz) {
-    chunk_t *c = slot(cx, cz);
-    return (c->loaded && c->cx == cx && c->cz == cz) ? (const void*)c : NULL;
 }
 
 // Amanatides & Woo voxel DDA: step the integer cell along `dir` until a solid hit.

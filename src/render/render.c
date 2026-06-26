@@ -13,14 +13,9 @@
 typedef struct { float px,py,pz,u,v; uint32_t info; } vertex;
 static inline int opaque(int b) { return b != BLOCK_AIR && b != BLOCK_WATER; }
 
-// MIRROR: byte-identical to `chunk_t` in src/world/world.c. Kept as a local view so render never
-// depends on world's internal layout beyond what world.h exposes; if `chunk_t` changes, update this too.
-typedef struct { int cx, cz, loaded, ymax; uint8_t blocks[CHUNK_SX * WORLD_SY * CHUNK_SZ]; } local_chunk_t;
-
 // One chunk's GPU meshes: opaque geometry + a separate translucent water mesh (drawn after, no depth write).
 typedef struct {
     int cx, cz, have;
-    int ymax;                      // cached from world_chunk_ymax at build time; avoids cross-module call per frame
     sg_buffer vb, ib;  int icount;
     sg_buffer wvb, wib; int wcount;
 } rchunk;
@@ -31,19 +26,9 @@ static struct {
     sg_sampler  smp;
     int         ccx, ccz;          // current centre chunk (set by render_update)
     rchunk      chunks[GRID * GRID];
-    rchunk     *have_list[GRID * GRID]; // flat list of chunks with have=1; rendered instead of scanning all 1024 slots
-    int         have_count;
 } g_r;
 
 static inline rchunk *rslot(int cx, int cz) { return &g_r.chunks[(cx & GRID_MASK) * GRID + (cz & GRID_MASK)]; }
-
-// have_list: append-only flat list of `have=1` chunks. render_frame iterates this instead of the
-// full GRID*GRID slot array; add is O(1), remove (linear) is rare and only used on slot reuse.
-static inline void have_add(rchunk *ch) { g_r.have_list[g_r.have_count++] = ch; }
-static void have_remove(rchunk *ch) {
-    for (int i = 0; i < g_r.have_count; ++i)
-        if (g_r.have_list[i] == ch) { g_r.have_list[i] = g_r.have_list[--g_r.have_count]; return; }
-}
 
 // --- block textures: load real PNGs from ./textures if present, else procedural friendly tiles ----
 #define TEX 16            // tile resolution (Minecraft default); non-16² PNGs nearest-resample to fit
@@ -139,31 +124,20 @@ static void reserve(int verts) {
 #define MASK_MAX (WORLD_SY * (CHUNK_SX > CHUNK_SZ ? CHUNK_SX : CHUNK_SZ))
 static int g_mask[MASK_MAX];
 
-// In-chunk fast read: skips the CX_OF/slot-lookup in world_block for the ~97% of cells that are
-// inside the local chunk's (cx,cz) box. Border slices (where (gx,gz) maps to a neighbour) and out-
-// of-Y cells fall through to the world_block slow path so cross-chunk face visibility is unchanged.
-// (CHUNK_SX == CHUNK_SZ so CX_OF works for both axes.)
-static inline uint8_t fast_block(local_chunk_t *lc, int cx, int cz, int gx, int gy, int gz) {
-    if (lc && CX_OF(gx) == cx && CX_OF(gz) == cz && (unsigned)gy < (unsigned)WORLD_SY)
-        return lc->blocks[((LX_OF(gx) * WORLD_SY + gy) * CHUNK_SZ) + LX_OF(gz)];
-    return world_block(gx, gy, gz);
-}
-
 // Greedy-mesh one pass of chunk (cx,cz) into the scratch buffers. pass 0 = opaque blocks;
 // pass 1 = water, where a face shows only against AIR (so water hidden under terrain/itself).
 static void mesh(int cx, int cz, int water) {
     int ytop = world_chunk_ymax(cx, cz) + 1; if (ytop > WORLD_SY) ytop = WORLD_SY;  // skip empty sky above the terrain
     int dims[3] = { CHUNK_SX, ytop, CHUNK_SZ };
     int off[3]  = { cx*CHUNK_SX, 0, cz*CHUNK_SZ };
-    local_chunk_t *lc = (local_chunk_t*)world_chunk_ptr(cx, cz);   // NULL → all cells use world_block()
     for (int d = 0; d < 3; ++d) {
         int u = (d+1)%3, v = (d+2)%3, wdim = dims[u], hdim = dims[v], p[3];
         for (int s = -1; s < dims[d]; ++s) {
             int n = 0;
             for (p[v] = 0; p[v] < hdim; ++p[v])
             for (p[u] = 0; p[u] < wdim; ++p[u], ++n) {
-                p[d] = s;   int A = fast_block(lc, cx, cz, off[0]+p[0], off[1]+p[1], off[2]+p[2]);
-                p[d] = s+1; int B = fast_block(lc, cx, cz, off[0]+p[0], off[1]+p[1], off[2]+p[2]);
+                p[d] = s;   int A = world_block(off[0]+p[0], off[1]+p[1], off[2]+p[2]);
+                p[d] = s+1; int B = world_block(off[0]+p[0], off[1]+p[1], off[2]+p[2]);
                 if (!water) {
                     int As = opaque(A), Bs = opaque(B);
                     g_mask[n] = (As && !Bs) ? (s >= 0        ?  A : 0)
@@ -235,10 +209,7 @@ static void build_chunk(rchunk *ch, int cx, int cz) {
     if (ssilen) { ch->vb = upload_vb(); ch->ib = upload_ib(); }
     ssvlen = ssilen = 0; mesh(cx, cz, 1); ch->wcount = ssilen;
     if (ssilen) { ch->wvb = upload_vb(); ch->wib = upload_ib(); }
-    ch->cx = cx; ch->cz = cz;
-    if (!ch->have) have_add(ch);
-    ch->have = 1;
-    ch->ymax = world_chunk_ymax(cx, cz);
+    ch->cx = cx; ch->cz = cz; ch->have = 1;
 }
 
 static const char *VS =
@@ -252,7 +223,6 @@ static const char *FS =
     "void main(){ vec4 t = texture(tex, vec3(uv, floor(vlayer+0.5))); frag_color = vec4(t.rgb*vshade, t.a); }\n";
 
 void render_init(void) {
-    g_r.have_count = 0;
     make_textures();
     sg_shader shd = sg_make_shader(&(sg_shader_desc){
         .vertex_func   = { .source = VS },
@@ -326,11 +296,11 @@ void render_frame(mat4 view_proj) {
     // pass 1: opaque
     sg_apply_pipeline(g_r.pip);
     sg_apply_uniforms(0, &u);
-    for (int i = 0; i < g_r.have_count; ++i) {
-        rchunk *ch = g_r.have_list[i];
-        if (!ch->icount) continue;
+    for (int i = 0; i < GRID*GRID; ++i) {
+        rchunk *ch = &g_r.chunks[i];
+        if (!ch->have || !ch->icount) continue;
         if (abs(ch->cx-g_r.ccx) > RENDER_RADIUS || abs(ch->cz-g_r.ccz) > RENDER_RADIUS) continue; // stale far slot
-        int ytop = ch->ymax > 0 ? ch->ymax : 1;        // cached from build time — no cross-module call
+        int ytop = world_chunk_ymax(ch->cx, ch->cz); if (ytop < 1) ytop = 1;   // AABB cap: skip empty sky
         if (!aabb_visible(pl, ch->cx*CHUNK_SX,0,ch->cz*CHUNK_SZ, (ch->cx+1)*CHUNK_SX,ytop,(ch->cz+1)*CHUNK_SZ)) continue;
         sg_apply_bindings(&(sg_bindings){ .vertex_buffers[0]=ch->vb, .index_buffer=ch->ib,
                                           .views[0]=g_r.tex_view, .samplers[0]=g_r.smp });
@@ -339,11 +309,11 @@ void render_frame(mat4 view_proj) {
     // pass 2: translucent water (after opaque so it blends over the scene; depth-write off)
     sg_apply_pipeline(g_r.pip_water);
     sg_apply_uniforms(0, &u);
-    for (int i = 0; i < g_r.have_count; ++i) {
-        rchunk *ch = g_r.have_list[i];
-        if (!ch->wcount) continue;
+    for (int i = 0; i < GRID*GRID; ++i) {
+        rchunk *ch = &g_r.chunks[i];
+        if (!ch->have || !ch->wcount) continue;
         if (abs(ch->cx-g_r.ccx) > RENDER_RADIUS || abs(ch->cz-g_r.ccz) > RENDER_RADIUS) continue;
-        int ytop = ch->ymax > 0 ? ch->ymax : 1;
+        int ytop = world_chunk_ymax(ch->cx, ch->cz); if (ytop < 1) ytop = 1;
         if (!aabb_visible(pl, ch->cx*CHUNK_SX,0,ch->cz*CHUNK_SZ, (ch->cx+1)*CHUNK_SX,ytop,(ch->cz+1)*CHUNK_SZ)) continue;
         sg_apply_bindings(&(sg_bindings){ .vertex_buffers[0]=ch->wvb, .index_buffer=ch->wib,
                                           .views[0]=g_r.tex_view, .samplers[0]=g_r.smp });
