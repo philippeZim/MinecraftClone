@@ -30,16 +30,12 @@ add_library(render STATIC src/render/render.c)
 target_include_directories(render PUBLIC src/render)
 target_link_libraries(render PUBLIC core PRIVATE world)
 
-# --- executables ------------------------------------------------------------------
+# --- executable -------------------------------------------------------------------
 add_executable(game src/main.c)
 target_link_libraries(game PRIVATE core world player render)
-
-add_executable(bench src/main_bench.c)
-target_link_libraries(bench PRIVATE core world player render)
 
 # --- platform link libs for sokol_app (Linux/X11 + GL) ---------------------------
 if(UNIX AND NOT APPLE)
     find_package(Threads REQUIRED)
-    target_link_libraries(game  PRIVATE X11 Xi Xcursor GL dl m Threads::Threads)
-    target_link_libraries(bench PRIVATE X11 Xi Xcursor GL dl m Threads::Threads)
+    target_link_libraries(game PRIVATE X11 Xi Xcursor GL dl m Threads::Threads)
 endif()
